@@ -95,7 +95,7 @@ fi
 
 export LINEAR_CLI_NO_PAGER="${LINEAR_CLI_NO_PAGER:-true}"
 
-if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+if [[ "$dry_run" != true && -z "${LINEAR_API_KEY:-}" ]]; then
   if ! linear-cli users me --output json >/dev/null 2>&1; then
     echo "No LINEAR_API_KEY in environment and no working linear-cli auth configuration" >&2
     exit 1

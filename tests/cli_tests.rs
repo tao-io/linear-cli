@@ -1,4 +1,8 @@
+use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Helper to run CLI commands and capture output
 fn run_cli(args: &[&str]) -> (i32, String, String) {
@@ -12,6 +16,19 @@ fn run_cli(args: &[&str]) -> (i32, String, String) {
     let code = output.status.code().unwrap_or(-1);
 
     (code, stdout, stderr)
+}
+
+fn unique_temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let dir = env::temp_dir().join(format!(
+        "linear-cli-{name}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
 }
 
 #[test]
@@ -355,6 +372,60 @@ fn test_version_contains_semver() {
         stdout.chars().any(|c| c == '.'),
         "Version output should contain a dot-separated version number"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_batch_issue_script_dry_run_skips_auth_probe() {
+    let temp_dir = unique_temp_dir("batch-script-dry-run");
+    let stub_path = temp_dir.join("linear-cli");
+    let log_path = temp_dir.join("calls.log");
+    let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/create-batch-issues.sh");
+    let original_path = env::var("PATH").unwrap_or_default();
+
+    fs::write(
+        &stub_path,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [[ \"$1 $2\" == \"issues create\" ]]; then\n  echo '{{\"id\":\"ok\"}}'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 99\n",
+            log_path.display()
+        ),
+    )
+    .expect("write linear-cli stub");
+
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&stub_path)
+        .status()
+        .expect("chmod stub")
+        .success();
+
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .args(["--count", "2", "--prefix", "Dry Run", "--dry-run", "--yes"])
+        .env("PATH", format!("{}:{original_path}", temp_dir.display()))
+        .output()
+        .expect("run batch issue script");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let log = fs::read_to_string(&log_path).expect("read stub log");
+
+    assert!(
+        output.status.success(),
+        "script should succeed in dry-run mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !log.contains("users me"),
+        "dry-run should not probe auth\nlog:\n{log}"
+    );
+    assert_eq!(
+        log.lines().count(),
+        2,
+        "dry-run should invoke create once per issue\nlog:\n{log}"
+    );
+    assert!(stdout.contains("Done. successful=2 failed=0 dry_run=true"));
+
+    fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
 }
 
 // --- Help tests for commands without coverage ---
